@@ -12,7 +12,6 @@
 #include <linux/if_ether.h>
 #include <linux/pkt_cls.h>
 #include <linux/netlink.h>
-#include <netlink/route/cls/flower.h>
 #include <netlink/route/cls/u32.h>
 #include <netlink/route/class.h>
 
