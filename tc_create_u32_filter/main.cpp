@@ -18,48 +18,6 @@
 #include <arpa/inet.h>
 using namespace std;
 
-int get_tc_classid(__u32 *h, const char *str)
-{
-    __u32 maj, min;
-    char *p;
-
-    maj = TC_H_ROOT;
-    if (strcmp(str, "root") == 0)
-        goto ok;
-    maj = TC_H_UNSPEC;
-    if (strcmp(str, "none") == 0)
-        goto ok;
-    maj = strtoul(str, &p, 16);
-    if (p == str) {
-        maj = 0;
-        if (*p != ':')
-            return -1;
-    }
-    if (*p == ':') {
-        if (maj >= (1<<16))
-            return -1;
-        maj <<= 16;
-        str = p+1;
-        min = strtoul(str, &p, 16);
-        if (*p != 0)
-            return -1;
-        if (min >= (1<<16))
-            return -1;
-        maj |= min;
-    } else if (*p != 0)
-        return -1;
-
-    ok:
-    *h = maj;
-    return 0;
-}
-
-uint32_t get_tc_classid_wrap(const std::string& handle) {
-    uint32_t id;
-    get_tc_classid(&id, handle.c_str());
-    return id;
-}
-
 void throw_err(int err) {
     if (err) {
         std::string error_str = "!!ERROR " + std::string(nl_geterror(err));
@@ -69,11 +27,11 @@ void throw_err(int err) {
 
 
 
-void add_qdisc_htb(int interface_index, uint32_t parent_handle, uint32_t handle, struct nl_sock* sock, uint32_t default_class) {
+void add_qdisc_htb(struct rtnl_link *link, uint32_t parent_handle, uint32_t handle, struct nl_sock* sock, uint32_t default_class) {
     int err;
     struct rtnl_qdisc *qdisc;
     qdisc = rtnl_qdisc_alloc();
-    rtnl_tc_set_ifindex(TC_CAST(qdisc), interface_index);
+    rtnl_tc_set_link(TC_CAST(qdisc), link);
 
     rtnl_tc_set_parent(TC_CAST(qdisc), parent_handle);
     rtnl_tc_set_handle(TC_CAST(qdisc), handle);
@@ -88,38 +46,17 @@ void add_qdisc_htb(int interface_index, uint32_t parent_handle, uint32_t handle,
     rtnl_qdisc_put(qdisc);
 }
 
-void add_qdisc_sfq(int interface_index, uint32_t parent_handle, uint32_t handle, struct nl_sock *sock) {
-    int err;
-
-    struct rtnl_qdisc *qdisc;
-
-    if (!(qdisc = rtnl_qdisc_alloc())) {
-        printf("Can not allocate qdisc object\n");
-        return;
-    }
-    rtnl_tc_set_ifindex(TC_CAST(qdisc), interface_index);
-    rtnl_tc_set_parent(TC_CAST(qdisc), parent_handle);
-
-    rtnl_tc_set_handle(TC_CAST(qdisc), TC_HANDLE(handle,0));
-    err = rtnl_tc_set_kind(TC_CAST(qdisc), "sfq");
-    throw_err(err);
-
-    err = rtnl_qdisc_add(sock, qdisc, NLM_F_CREATE | NLM_F_REPLACE);
-    throw_err(err);
-
-    /* Return the qdisc object to free memory resources */
-    rtnl_qdisc_put(qdisc);
-}
 
 
-void add_htb_class(int interface_index, uint32_t parent_handle, uint32_t handle, struct nl_sock* sock,
+
+void add_htb_class(struct rtnl_link *link, uint32_t parent_handle, uint32_t handle, struct nl_sock* sock,
                    uint32_t rate, uint32_t ceil = 0, uint32_t prio = 0, uint32_t quantum = 0) {
     int err;
 
     struct rtnl_class *cl;
 
     cl = rtnl_class_alloc();
-    rtnl_tc_set_ifindex(TC_CAST(cl), interface_index);
+    rtnl_tc_set_link(TC_CAST(cl), link);
     rtnl_tc_set_parent(TC_CAST(cl), parent_handle);
     rtnl_tc_set_handle(TC_CAST(cl), handle); // 1:1
 
@@ -153,11 +90,11 @@ struct u32key {
     int keyoffmask;
 };
 
-void add_u32_filter_32key(int interface_index, uint32_t handle, uint32_t flowid, struct nl_sock* sock, int prio, u32key key) {
+void add_u32_filter_32key(struct rtnl_link *link, uint32_t handle, uint32_t flowid, struct nl_sock* sock, int prio, u32key key) {
     struct rtnl_cls *filter;
     int err;
     filter = rtnl_cls_alloc();
-    rtnl_tc_set_ifindex(TC_CAST(filter), interface_index);
+    rtnl_tc_set_link(TC_CAST(filter), link);
     rtnl_tc_set_parent(TC_CAST(filter), handle);
     err = rtnl_tc_set_kind(TC_CAST(filter), "u32");
 
@@ -200,21 +137,20 @@ int main() {
     rtnl_qdisc_delete(sock, qdisc);
     free(qdisc);
 
-    if_index = rtnl_link_get_ifindex(link);
 
 
     //tc qdisc add dev eth1 root handle 1: htb default 20
-    add_qdisc_htb(if_index, TC_H_ROOT, get_tc_classid_wrap("1:0"), sock, get_tc_classid_wrap("20"));
+    add_qdisc_htb(link, TC_H_ROOT, TC_HANDLE(0x1, 0), sock, TC_HANDLE(0, 0x20));
 
 
     //tc class add dev eth1 parent 1: classid 1:1 htb rate 10240kbit
-    add_htb_class(if_index, get_tc_classid_wrap("1:"), get_tc_classid_wrap("1:1"), sock, 1250000);
+    add_htb_class(link, TC_HANDLE(0x1, 0), TC_HANDLE(0x1, 0x1), sock, 1250000);
 
     //tc class add dev eth1 parent 1:1 classid 1:10 htb rate 7168kbit
-    add_htb_class(if_index, get_tc_classid_wrap("1:1"), get_tc_classid_wrap("1:10"), sock, 12500, 1250000, 1);
+    add_htb_class(link, TC_HANDLE(0x1, 0x1), TC_HANDLE(0x1, 0x10), sock, 12500, 1250000, 1);
 
     //tc class add dev eth1 parent 1:1 classid 1:20 htb rate 3072kbit ceil 10240kbit
-    add_htb_class(if_index, get_tc_classid_wrap("1:1"), get_tc_classid_wrap("1:20"), sock, 12500, 1250000, 2);
+    add_htb_class(link, TC_HANDLE(0x1, 0x1), TC_HANDLE(0x1, 0x20), sock, 12500, 1250000, 2);
 
     u32key key;
     inet_pton(AF_INET, "127.0.0.1", &(key.value));
@@ -225,7 +161,7 @@ int main() {
     int prio = 1;
 
     //tc filter add dev lo parent 1: protocol ip prio 1 u32  match ip dst 127.0.0.1/32  flowid 1:10
-    add_u32_filter_32key(if_index, get_tc_classid_wrap("1:0"), get_tc_classid_wrap("1:10"), sock, prio, key);
+    add_u32_filter_32key(link, TC_HANDLE(0x1, 0), TC_HANDLE(0x1, 0x10), sock, prio, key);
 
     return 0;
 }
