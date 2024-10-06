@@ -1,6 +1,4 @@
 #include <iostream>
-#include <string>
-
 #include <netlink/netlink.h>
 #include <netlink/route/link.h>
 #include <netlink/route/tc.h>
@@ -12,13 +10,11 @@
 #include <linux/if_ether.h>
 #include <linux/pkt_cls.h>
 #include <linux/netlink.h>
-#include <netlink/route/act/gact.h>
+#include <netlink/route/cls/flower.h>
 #include <netlink/route/cls/u32.h>
 #include <netlink/route/class.h>
+#include <netlink/route/act/skbedit.h>
 
-#include <arpa/inet.h>
-
-using namespace std;
 
 
 
@@ -30,7 +26,6 @@ void throw_err(int err) {
 }
 
 
-
 void add_qdisc_ingress(struct rtnl_link *link, uint32_t parent_handle, uint32_t handle, struct nl_sock* sock) {
     int err;
     struct rtnl_qdisc *qdisc;
@@ -38,7 +33,6 @@ void add_qdisc_ingress(struct rtnl_link *link, uint32_t parent_handle, uint32_t 
     rtnl_tc_set_link(TC_CAST(qdisc), link);
 
     rtnl_tc_set_parent(TC_CAST(qdisc), parent_handle);
-   // rtnl_qdisc_delete(sock, qdisc);
     rtnl_tc_set_handle(TC_CAST(qdisc), handle);
     err = rtnl_tc_set_kind(TC_CAST(qdisc), "ingress");
     throw_err(err);
@@ -49,34 +43,23 @@ void add_qdisc_ingress(struct rtnl_link *link, uint32_t parent_handle, uint32_t 
     rtnl_qdisc_put(qdisc);
 }
 
-struct u32key {
-    uint32_t value;
-    uint32_t mask;
-    int offset;
-    int keyoffmask;
-};
-
-void add_u32_filter_32key_with_action(struct rtnl_link *link, uint32_t handle, uint32_t flowid, struct nl_sock* sock, int prio, u32key key, struct rtnl_act* act) {
+void add_flower_filter(struct rtnl_link *link, uint32_t parent_handle, struct nl_sock* sock, int prio, struct rtnl_act* act, uint16_t vlan_id) {
     struct rtnl_cls *filter;
     int err;
     filter = rtnl_cls_alloc();
     rtnl_tc_set_link(TC_CAST(filter), link);
-    rtnl_tc_set_parent(TC_CAST(filter), handle);
-    err = rtnl_tc_set_kind(TC_CAST(filter), "u32");
 
+    rtnl_tc_set_parent(TC_CAST(filter), parent_handle);
+    err = rtnl_tc_set_kind(TC_CAST(filter), "flower");
     throw_err(err);
+
     rtnl_cls_set_prio(filter, prio);
-    rtnl_cls_set_protocol(filter, ETH_P_ALL);
-    err = rtnl_u32_add_key_uint32(filter, key.value, key.mask, key.offset, key.keyoffmask);
+    rtnl_cls_set_protocol(filter, ETH_P_8021Q);
+    err = rtnl_flower_set_vlan_id(filter, vlan_id);
+
     throw_err(err);
 
-    err = rtnl_u32_set_classid(filter, flowid);
-    throw_err(err);
-
-
-    rtnl_u32_add_action(filter, act);
-    throw_err(err);
-    err = rtnl_u32_set_cls_terminal(filter);
+    err = rtnl_flower_append_action(filter, act);
     throw_err(err);
 
     err = rtnl_cls_add(sock, filter, NLM_F_CREATE);
@@ -86,8 +69,8 @@ void add_u32_filter_32key_with_action(struct rtnl_link *link, uint32_t handle, u
 
 
 
+int main() {
 
-int main(int argc, char **argv) {
     struct nl_cache *cache;
     struct rtnl_link *link;
     struct nl_sock *sock;
@@ -114,26 +97,19 @@ int main(int argc, char **argv) {
     //tc qdisc add dev lo ingress
     add_qdisc_ingress(link, TC_H_INGRESS, TC_HANDLE(0xffff, 0), sock);
 
+
+
     struct rtnl_act *act = rtnl_act_alloc();
     if (!act) {
         printf("rtnl_act_alloc() returns %p\n", act);
         return -1;
     }
-    rtnl_tc_set_kind(TC_CAST(act), "gact");
+    rtnl_tc_set_kind(TC_CAST(act), "skbedit");
 
-    rtnl_gact_set_action(act, TC_ACT_SHOT);
+    rtnl_skbedit_set_action(act, TC_ACT_PIPE);
+    rtnl_skbedit_set_mark(act, 11);
 
 
-    u32key key;
-    inet_pton(AF_INET, "127.0.0.1", &(key.value));
-    inet_pton(AF_INET, "255.255.255.255", &(key.mask));
-    key.value = ntohl(key.value);
-    key.mask = ntohl(key.mask);
-    key.offset = 16; // OFFSET_DESTINATION
-    int prio = 1;
-
-      //tc filter add dev lo parent 1: protocol ip prio 1 u32  match ip dst 127.0.0.1/32  flowid 1:10 action drop
-    add_u32_filter_32key_with_action(link, TC_HANDLE(0xffff, 0), TC_HANDLE(0x1, 0xeeee), sock, prio, key, act);
-
+   add_flower_filter(link, TC_HANDLE(0xffff, 0), sock, 1, act, 101);
     return 0;
 }
